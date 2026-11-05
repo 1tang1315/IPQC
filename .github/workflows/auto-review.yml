@@ -12,18 +12,54 @@ concurrency:
   group: auto-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  KIMI_MODEL_NAME: ${{ vars.LLM_MODEL || 'kimi-for-coding' }}
+  KIMI_MODEL_API_KEY: ${{ secrets.LLM_API_KEY }}
+  KIMI_MODEL_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.kimi.com/coding/v1' }}
+  KIMI_CODE_TRUST_WORKSPACE: '1'
+  KIMI_CODE_NO_AUTO_UPDATE: '1'
+  KIMI_DISABLE_TELEMETRY: '1'
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   review:
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@v4
-      - name: AI 代码评审
-        run: python .github/scripts/review_pr.py
+      - name: 安装 Kimi Code CLI
+        uses: ./.github/actions/setup-kimi
+        with:
+          version: ${{ vars.KIMI_CLI_VERSION || 'latest' }}
+      - name: 使用 Kimi Code 分析 PR
+        run: kimi -p "$(cat .github/prompts/review.md)"
+      - name: 校验并提交结构化评审
+        run: |
+          jq -e '
+            (.verdict == "approve" or .verdict == "request_changes") and
+            (.summary | type == "string") and
+            (.findings | type == "array")
+          ' /tmp/auto-dev-review.json
+          if [ "$(jq -r '.verdict' /tmp/auto-dev-review.json)" = "approve" ]; then
+            event="APPROVE"
+          else
+            event="REQUEST_CHANGES"
+          fi
+          jq -r '
+            (if .verdict == "approve" then "✅ AI 评审通过" else "❌ AI 评审未通过，请修复以下问题" end),
+            "",
+            .summary,
+            "",
+            (if (.findings | length) > 0 then
+              "**问题清单**",
+              (.findings[] | "- **\(.severity // "minor")** `\(.file // "未指定文件")` — \(.detail // "")")
+            else empty end),
+            "",
+            "---",
+            "🤖 由 Kimi Code 自动评审"
+          ' /tmp/auto-dev-review.json > /tmp/auto-dev-review.md
+          jq -n --arg event "$event" --rawfile body /tmp/auto-dev-review.md '{event: $event, body: $body}' > /tmp/auto-dev-review-payload.json
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --input /tmp/auto-dev-review-payload.json
