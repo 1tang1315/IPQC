@@ -1,0 +1,32 @@
+name: Setup Kimi Code CLI
+description: Install Node.js and Kimi Code CLI for non-interactive CI execution
+
+inputs:
+  version:
+    description: Version of @moonshot-ai/kimi-code to install
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Check Kimi API key
+      shell: bash
+      run: |
+        if [ -z "${KIMI_MODEL_API_KEY:-}" ]; then
+          echo "KIMI_MODEL_API_KEY is empty. Configure the LLM_API_KEY repository secret."
+          exit 1
+        fi
+
+    - name: Install Kimi Code CLI
+      shell: bash
+      run: npm install -g "@moonshot-ai/kimi-code@${{ inputs.version }}"
+
+    - name: Verify Kimi Code CLI
+      shell: bash
+      run: kimi --version
