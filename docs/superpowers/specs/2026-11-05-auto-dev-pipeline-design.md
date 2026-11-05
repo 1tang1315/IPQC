@@ -1,11 +1,11 @@
 # IPQC 仓库自动开发流水线 — 设计文档
 
 日期：2026-11-05
-状态：已实现（本文档与代码同批次提交）
+状态：Kimi Code CLI 版已实现
 
 ## 意图与背景
 
-用户希望基于 GitHub 仓库实现一条"方案 → 开发 → 评审 → 合并"的自动开发流水线：
+基于 GitHub 仓库实现一条“方案 → 开发 → 评审 → 合并”的自动开发流水线：
 
 1. 自动发现仓库中的新增方案文档（`proposals/*.md`）和带 `proposal` 标签的 Issue，并由 AI 生成开发方案；
 2. 人工审核方案（给 Issue 加 `approved` 标签）后，AI 按方案中的任务拆分自动开发代码，完成后提交 PR；
@@ -14,72 +14,75 @@
 
 ## 目标 / 非目标 / 反目标
 
-- 目标：上述 4 步全自动闭环；全部逻辑版本化在仓库内；对任意 OpenAI 兼容模型Provider 可配置。
-- 非目标：不做对话式机器人（不响应 `/command` 评论命令）；v1 不做行内（inline）评审评论，评审以 PR Review（Approve / Request changes）形式给出。
-- 反目标：绝不让 AI 修改 `.github/workflows/` 与 `.github/scripts/`（流水线自身）；绝不自动合并非 `auto/` 前缀分支的 PR（人工 PR 只做评审，不做合并）。
+- 目标：全流程事件驱动；复用 Kimi Code 的代码阅读、编辑、命令执行和测试修复能力；编排逻辑全部版本化。
+- 非目标：不做对话式评论机器人；不做行内评审评论；不维护自写的 LLM 工具循环。
+- 反目标：不允许 AI 修改 `.github/`；不自动合并非 `auto/` 前缀分支的 PR；不向 fork PR 暴露模型凭据。
 
 ## 候选方案（Approaches）
 
 | 方案 | 说明 | 取舍 |
 | --- | --- | --- |
-| A. GitHub Actions + LLM API（**选定**） | 5 个 workflow + Python 脚本，事件驱动，代码全部在仓库内 | 与 GitHub 原生集成（用户明确要求"基于 GitHub 仓库"）；无需常驻服务器；缺点：单 job 最长 6 小时，超长任务需拆分方案 |
-| B. 自托管常驻 Agent（如 Kimi Code CLI 轮询） | 本地/服务器跑 Agent 监听仓库事件 | 依赖机器常开、网络与凭据管理；不符合"基于 GitHub"的诉求 |
-| C. 第三方平台（Devin / OpenHands / Copilot coding agent） | 托管服务 | 引入外部依赖与费用，可控性与可审计性差 |
+| A. GitHub Actions + Kimi Code CLI（**选定**） | Workflow 编排，`kimi -p` 执行智能任务，gh/git 完成确定性操作 | 复用完整 Agent 能力，无需自写 Agent；runner 需安装 CLI，非交互模式自动执行工具 |
+| B. GitHub Actions + Python + LLM API | 自写 LLM 客户端、文件工具和 Agent 循环 | 通用、依赖少，但重复实现 Agent，代码能力和维护性较弱；本版移除 |
+| C. 本机常驻 Agent 轮询 | 当前 Desktop/CLI 会话定时检查仓库 | 依赖机器和会话在线，不是可靠的 GitHub 事件消费者 |
 
-选定 A：事件驱动、透明、可审计，且完全落在仓库内。
+选定 A：最符合“Workflow + 当前 Agent 机制”的目标，同时保留 GitHub 原生的事件、权限和审计能力。
 
 ## 架构
 
-```
+```text
 Issue(proposal 标签) 或 proposals/*.md 推送
         │
         ▼
-auto-plan ──AI 生成方案──► 方案以评论形式发到 Issue，加 plan-ready 标签
+auto-plan ──kimi -p 生成方案──► Issue 评论 + plan-ready 标签
         │
         ▼  人工审核：加 approved 标签
-auto-develop ──AI 读方案、逐任务改代码──► 推送 auto/issue-<n>-<slug> 分支，创建 PR（Closes #n）
+auto-develop ──kimi -p 实现并测试──► Workflow 校验、提交、推送、创建 PR
         │
         ▼
-auto-review ──AI 评审 diff──► Approve 或 Request changes（GitHub PR Review）
+auto-review ──kimi -p 输出结构化评审──► Workflow 提交 PR Review
         │                         │
         │ Approve                 │ Request changes
         ▼                         ▼
-auto-merge ◄────────────── auto-fix：AI 按评审意见修复、推送
+auto-merge ◄────────────── auto-fix：kimi -p 修复，Workflow 校验并推送
  squash 合并 + 删除分支        （触发 synchronize → 重新评审，最多 3 轮）
 ```
 
 ### 组件
 
-- `.github/auto-dev.json`：流水线配置（标签名、分支前缀、默认模型、测试命令、受保护路径、修复轮数上限）。
-- `.github/scripts/ai.py`：OpenAI 兼容 LLM 客户端 + 受限文件工具（list_files / read_file / write_file，禁止越出仓库、禁止写受保护路径）+ agent 工具循环。
-- `.github/scripts/generate_plan.py`：方案生成（Issue 模式 / 提案文档模式）。
-- `.github/scripts/develop.py`：自动开发：取方案 → agent 实现全部任务 → 可选测试命令验证失败自动修复 → 提交分支与 PR。
-- `.github/scripts/review_pr.py`：AI 评审，输出结构化 JSON 结论，提交 PR Review。
-- `.github/scripts/fix_pr.py`：AI 按 Request changes 评审意见修复并推送（带轮数上限保险）。
-- 5 个 workflow：auto-plan / auto-develop / auto-review / auto-fix / auto-merge。
+- `.github/actions/setup-kimi/action.yml`：复合 Action，安装 Node.js 22 与 `@moonshot-ai/kimi-code`，校验 CLI 和 API Key。
+- `.github/prompts/plan-issue.md`：从 Issue 生成方案并发布评论。
+- `.github/prompts/plan-doc.md`：从方案文档生成方案，创建或更新对应 Issue。
+- `.github/prompts/develop.md`：读取已审核方案，实现任务、运行测试并写实现摘要。
+- `.github/prompts/review.md`：评审 PR，写结构化 JSON 到 runner 临时目录。
+- `.github/prompts/fix.md`：按最新打回评审修复代码并写修复摘要。
+- `.github/workflows/`：5 个事件驱动 Workflow，负责触发、分支、校验、提交、评审发布和合并。
 
-### 关键机制与护栏
+## 关键机制与护栏
 
-- **审核闸口**：方案生成后只是评论 + 标签，必须人工加 `approved` 标签才开发；这是全流程唯一必需的人工动作。
-- **自动合并闸口**：仅当 `head.ref` 以 `auto/` 开头、且 Approve 评审者是 `github-actions[bot]` 时才自动合并；非机器人评审通过不触发合并。
-- **自修改防护**：AI 文件工具拒绝写入 `protectedPaths`（默认 `.github/workflows/`、`.github/scripts/`）。
-- **防死循环**：自动修复最多 `maxReviewRounds`（默认 3）轮，超限后留言转人工；agent 单轮数与文件大小均设上限。
-- **幂等**：重复触发 plan 不会重复生成；develop 重复触发会复用已存在的分支与 PR 并更新。
+- **审核闸口**：只有人工添加 `approved` 标签才进入开发。
+- **自动合并闸口**：仅 `auto/` 分支、`github-actions[bot]` 的 Approved 评审可触发；等待检查通过后 squash 合并并删分支。
+- **自修改防护**：Prompt 禁止修改 `.github/`，Workflow 在提交前再次用 Git diff 强制检查；命中即失败，不推送。
+- **防空提交**：开发和修复没有文件变更时只留言，不创建空提交或 PR。
+- **防死循环**：机器人 Request changes 达到 3 次后停止自动修复并转人工。
+- **幂等**：已有机器人方案评论时跳过 Issue 方案生成；开发复用 `auto/issue-<n>` 分支和已有 PR。
+- **fork 安全**：只评审与目标仓库同源的 PR；fork PR 不启动带模型 Secret 的 Agent。
 
-## LLM 配置
+## LLM 与 CLI 配置
 
-- Provider：Kimi Code API（OpenAI 兼容），Base URL 默认 `https://api.kimi.com/coding/v1`（海外 `https://api.kimi.ai/coding/v1`），默认模型 `kimi-for-coding`。
-- 凭据：仓库 Secret `LLM_API_KEY`（在 Kimi Code 控制台创建）；可用仓库 Variables `LLM_BASE_URL` / `LLM_MODEL` 覆盖。
-- 亦兼容任意 OpenAI 兼容端点（换 Base URL 与 Key 即可）。
+- Secret：`LLM_API_KEY` 映射为 `KIMI_MODEL_API_KEY`。
+- Variables：`LLM_BASE_URL`（默认 `https://api.kimi.com/coding/v1`）、`LLM_MODEL`（默认 `kimi-for-coding`）、`KIMI_CLI_VERSION`（默认 `latest`，生产使用建议固定版本）。
+- CLI 使用 `kimi -p` 非交互模式；该模式默认自动执行常规工具，因此 Workflow 使用最小权限并保留确定性安全检查。
 
 ## 我做的决定（Assumptions / Calls）
 
-- 仓库可见性为 Public（用户已确认）；流水线不处理机密代码场景。
-- 方案/评审语言：跟随 Issue 语言，提示词以中文编写。
-- 合并策略：squash，保持 main 历史干净。
-- 测试命令默认未配置；在 `.github/auto-dev.json` 的 `testCommand` 配置后，develop 阶段会自动运行并在失败时让 AI 修复。
-- PR Review 采用整体评审（summary + findings），不做行内评论（后续增强项）。
+- 开发分支统一为 `auto/issue-<n>`，不再从可能包含中文的标题生成 slug。
+- AI 自行识别并运行项目现有测试；没有测试时进行与项目匹配的构建或静态检查。
+- 评审采用整体 PR Review（summary + findings），不做行内评论。
+- 固定保护整个 `.github/` 目录；最大自动修复轮数固定为 3，均可在 Workflow 中直接调整。
 
 ## 参考
 
-- Kimi Code 文档（API 接入 / 模型列表）：https://www.kimi.com/code/docs/en/
+- CLI 安装：https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html
+- 非交互命令：https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html
+- CI 环境变量：https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html
