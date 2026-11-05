@@ -61,7 +61,8 @@ auto-merge ◄────────────── auto-fix：kimi -p 修�
 ## 关键机制与护栏
 
 - **审核闸口**：只有人工添加 `approved` 标签才进入开发。
-- **自动合并闸口**：仅 `auto/` 分支、`github-actions[bot]` 的 Approved 评审可触发；等待检查通过后 squash 合并并删分支。
+- **事件链**：不依赖 `GITHUB_TOKEN` 产生的 PR、push 或 Review 再触发 Workflow；各阶段通过带 PR 参数的 `workflow_dispatch` 显式调度下一阶段，只有 develop/review/fix 授予 `actions: write`。
+- **自动合并闸口**：仅 `auto/` 分支、`github-actions[bot]` 对当前 head SHA 的 Approved 评审可进入合并；等待检查通过后，以 GitHub Merge API 的 `sha` 参数原子校验 head 并 squash 合并，再删除分支。
 - **自修改防护**：Prompt 禁止修改 `.github/`，Workflow 在提交前再次用 Git diff 强制检查；命中即失败，不推送。
 - **防空提交**：开发和修复没有文件变更时只留言，不创建空提交或 PR。
 - **防死循环**：最多自动修复 3 轮；第 4 次被机器人 Request changes 打回时停止修复并转人工。

@@ -47,7 +47,7 @@ Workflow 会通过仓库内复合 Action 安装 Node.js 22 和 `@moonshot-ai/kim
 ## 实现方式与自定义
 
 - **智能任务**：`.github/prompts/` 下的五个 Prompt 分别控制 Issue 方案、文档方案、开发、评审和修复，可直接按项目约定调整。
-- **确定性操作**：`.github/workflows/` 负责触发条件、分支复用、空变更检测、保护目录检查、提交、PR、评审发布和合并。
+- **确定性操作**：`.github/workflows/` 负责触发条件、分支复用、空变更检测、保护目录检查、提交、PR、评审发布和合并。各阶段通过 `workflow_dispatch` 显式调度下一阶段，避免 `GITHUB_TOKEN` 的二次事件抑制。
 - **CLI 安装**：`.github/actions/setup-kimi/action.yml` 统一安装和校验 Kimi Code CLI。
 - **项目测试**：Agent 自动识别并运行项目已有的测试、构建或静态检查；失败时修复并重跑。
 
@@ -56,7 +56,7 @@ Workflow 会通过仓库内复合 Action 安装 Node.js 22 和 `@moonshot-ai/kim
 - `kimi -p` 非交互模式会自动执行常规工具，因此只向 Workflow 提供完成任务必需的权限和凭据；
 - Prompt 禁止修改 `.github/`，Workflow 在提交前再次通过 Git diff 强制检查，命中即失败且不推送；
 - 没有文件变更时不创建空提交或 PR；
-- 自动合并仅接受 `auto/` 分支和 `github-actions[bot]` 的 Approved 评审；
+- 自动合并仅接受 `auto/` 分支和 `github-actions[bot]` 对当前 head SHA 的 Approved 评审；合并 API 会再次原子校验 SHA，防止旧评审合入新提交；
 - fork PR 不运行自动评审，避免向不受信任代码暴露模型 Secret；
 - 建议为 `main` 配置分支保护规则，与自动合并前的检查等待步骤配合。
 

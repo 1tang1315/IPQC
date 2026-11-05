@@ -8,6 +8,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 concurrency:
   group: auto-develop-${{ github.event.issue.number }}
@@ -75,9 +76,10 @@ jobs:
       - name: 阻止修改受保护目录
         if: steps.changes.outputs.changed == 'true'
         run: |
-          if git diff --cached --name-only | grep -q '^\.github/'; then
+          protected=$(git diff --cached --name-only -- .github/)
+          if [ -n "$protected" ]; then
             echo "Agent attempted to modify protected .github/ paths. Changes will not be committed."
-            git diff --cached --name-only
+            printf '%s\n' "$protected"
             exit 1
           fi
       - name: 提交并推送开发分支
@@ -86,6 +88,7 @@ jobs:
           git commit -m "auto: implement issue #${ISSUE_NUMBER}"
           git push -u origin "$BRANCH_NAME"
       - name: 创建或更新 PR
+        id: pr
         if: steps.changes.outputs.changed == 'true'
         run: |
           if [ ! -s /tmp/auto-dev-summary.md ]; then
@@ -115,5 +118,10 @@ jobs:
               echo "🤖 由 Kimi Code 自动开发"
             } > /tmp/auto-dev-pr-body.md
             pr_url=$(gh pr create --title "auto: ${issue_title} (#${ISSUE_NUMBER})" --body-file /tmp/auto-dev-pr-body.md)
+            pr_number=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number')
           fi
+          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
           gh issue comment "$ISSUE_NUMBER" --body "开发完成，PR：${pr_url}"
+      - name: 显式调度自动评审
+        if: steps.changes.outputs.changed == 'true'
+        run: gh workflow run auto-review.yml -f pr_number="${{ steps.pr.outputs.number }}"
