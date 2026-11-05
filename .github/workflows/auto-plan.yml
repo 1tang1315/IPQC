@@ -1,0 +1,62 @@
+name: auto-plan
+
+on:
+  issues:
+    types: [opened, labeled]
+  push:
+    branches: [main]
+    paths:
+      - "proposals/**"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: auto-plan-${{ github.event.issue.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  from-issue:
+    if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'proposal')
+    runs-on: ubuntu-latest
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 生成开发方案
+        run: python .github/scripts/generate_plan.py
+
+  from-doc:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 找出新增/修改的方案文档
+        id: files
+        run: |
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            files=$(git ls-files 'proposals/*.md')
+          else
+            files=$(git diff --name-only --diff-filter=AM "${{ github.event.before }}" "${{ github.sha }}" -- 'proposals/*.md')
+          fi
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$files" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - name: 生成开发方案
+        if: steps.files.outputs.files != ''
+        run: |
+          for f in ${{ steps.files.outputs.files }}; do
+            PROPOSAL_PATH="$f" python .github/scripts/generate_plan.py
+          done

@@ -1,0 +1,14 @@
+{
+  "labels": {
+    "proposal": "proposal",
+    "planReady": "plan-ready",
+    "approved": "approved"
+  },
+  "branchPrefix": "auto/",
+  "defaultModel": "kimi-for-coding",
+  "maxDevRounds": 60,
+  "maxFixRounds": 2,
+  "maxReviewRounds": 3,
+  "testCommand": "",
+  "protectedPaths": [".github/workflows", ".github/scripts"]
+}

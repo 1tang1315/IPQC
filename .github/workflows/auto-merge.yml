@@ -1,0 +1,40 @@
+name: auto-merge
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.review.state == 'approved' &&
+      startsWith(github.event.pull_request.head.ref, 'auto/') &&
+      github.event.review.user.login == 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 等待检查通过
+        run: |
+          set -u
+          status=0
+          gh pr checks "$PR_NUMBER" --watch || status=$?
+          out=$(gh pr checks "$PR_NUMBER" 2>&1 || true)
+          echo "$out"
+          if [ "$status" -ne 0 ]; then
+            if echo "$out" | grep -qi "no checks reported"; then
+              echo "该 PR 无检查项，直接进入合并"
+              exit 0
+            fi
+            echo "检查未通过，取消自动合并"
+            exit 1
+          fi
+      - name: Squash 合并并删除分支
+        run: gh pr merge "$PR_NUMBER" --squash --delete-branch

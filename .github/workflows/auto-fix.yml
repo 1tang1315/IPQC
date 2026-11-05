@@ -1,0 +1,35 @@
+name: auto-fix
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-fix-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: >-
+      github.event.review.state == 'changes_requested' &&
+      startsWith(github.event.pull_request.head.ref, 'auto/') &&
+      github.event.review.user.login == 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: 按评审意见自动修复
+        run: python .github/scripts/fix_pr.py

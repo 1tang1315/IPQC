@@ -1,0 +1,32 @@
+name: auto-develop
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: auto-develop-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  develop:
+    if: github.event.label.name == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 按方案自动开发并提交 PR
+        run: python .github/scripts/develop.py
