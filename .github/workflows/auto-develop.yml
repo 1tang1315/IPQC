@@ -13,20 +13,107 @@ concurrency:
   group: auto-develop-${{ github.event.issue.number }}
   cancel-in-progress: false
 
+env:
+  KIMI_MODEL_NAME: ${{ vars.LLM_MODEL || 'kimi-for-coding' }}
+  KIMI_MODEL_API_KEY: ${{ secrets.LLM_API_KEY }}
+  KIMI_MODEL_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.kimi.com/coding/v1' }}
+  KIMI_CODE_TRUST_WORKSPACE: '1'
+  KIMI_CODE_NO_AUTO_UPDATE: '1'
+  KIMI_DISABLE_TELEMETRY: '1'
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   develop:
     if: github.event.label.name == 'approved'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ISSUE_NUMBER: ${{ github.event.issue.number }}
+      BRANCH_NAME: auto/issue-${{ github.event.issue.number }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 按方案自动开发并提交 PR
-        run: python .github/scripts/develop.py
+      - name: 检查已审核方案
+        id: plan
+        run: |
+          found=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '[.comments[] | select(.author.login == "github-actions[bot]") | .body | contains("<!-- auto-dev-plan -->")] | any')
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+          if [ "$found" != "true" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "未找到自动生成的方案评论。请先添加 proposal 标签生成方案，审核后再添加 approved 标签。"
+          fi
+      - name: 安装 Kimi Code CLI
+        if: steps.plan.outputs.found == 'true'
+        uses: ./.github/actions/setup-kimi
+        with:
+          version: ${{ vars.KIMI_CLI_VERSION || 'latest' }}
+      - name: 准备开发分支
+        if: steps.plan.outputs.found == 'true'
+        run: |
+          git config user.name "auto-dev-bot"
+          git config user.email "auto-dev-bot@users.noreply.github.com"
+          git fetch origin
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" > /dev/null 2>&1; then
+            git checkout -B "$BRANCH_NAME" "origin/$BRANCH_NAME"
+          else
+            git checkout -B "$BRANCH_NAME" origin/main
+          fi
+      - name: 使用 Kimi Code 实现方案并运行验证
+        if: steps.plan.outputs.found == 'true'
+        run: kimi -p "$(cat .github/prompts/develop.md)"
+      - name: 检测文件变更
+        id: changes
+        if: steps.plan.outputs.found == 'true'
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            gh issue comment "$ISSUE_NUMBER" --body "开发流程已执行，但没有检测到文件变更，未创建提交或 PR。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 阻止修改受保护目录
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          if git diff --cached --name-only | grep -q '^\.github/'; then
+            echo "Agent attempted to modify protected .github/ paths. Changes will not be committed."
+            git diff --cached --name-only
+            exit 1
+          fi
+      - name: 提交并推送开发分支
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git commit -m "auto: implement issue #${ISSUE_NUMBER}"
+          git push -u origin "$BRANCH_NAME"
+      - name: 创建或更新 PR
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          if [ ! -s /tmp/auto-dev-summary.md ]; then
+            echo "Kimi Code 已按方案完成开发，详细过程请查看 Actions 日志。" > /tmp/auto-dev-summary.md
+          fi
+          pr_number=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number // empty')
+          if [ -n "$pr_number" ]; then
+            {
+              echo "已更新实现。"
+              echo
+              echo "## 最新实现摘要"
+              cat /tmp/auto-dev-summary.md
+            } > /tmp/auto-dev-pr-update.md
+            gh pr comment "$pr_number" --body-file /tmp/auto-dev-pr-update.md
+            pr_url=$(gh pr view "$pr_number" --json url --jq '.url')
+          else
+            issue_title=$(gh issue view "$ISSUE_NUMBER" --json title --jq '.title')
+            {
+              echo "自动开发，对应 Issue #${ISSUE_NUMBER}"
+              echo
+              echo "Closes #${ISSUE_NUMBER}"
+              echo
+              echo "## 实现摘要"
+              cat /tmp/auto-dev-summary.md
+              echo
+              echo "---"
+              echo "🤖 由 Kimi Code 自动开发"
+            } > /tmp/auto-dev-pr-body.md
+            pr_url=$(gh pr create --title "auto: ${issue_title} (#${ISSUE_NUMBER})" --body-file /tmp/auto-dev-pr-body.md)
+          fi
+          gh issue comment "$ISSUE_NUMBER" --body "开发完成，PR：${pr_url}"
