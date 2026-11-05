@@ -16,47 +16,70 @@ concurrency:
   group: auto-plan-${{ github.event.issue.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  KIMI_MODEL_NAME: ${{ vars.LLM_MODEL || 'kimi-for-coding' }}
+  KIMI_MODEL_API_KEY: ${{ secrets.LLM_API_KEY }}
+  KIMI_MODEL_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.kimi.com/coding/v1' }}
+  KIMI_CODE_TRUST_WORKSPACE: '1'
+  KIMI_CODE_NO_AUTO_UPDATE: '1'
+  KIMI_DISABLE_TELEMETRY: '1'
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   from-issue:
     if: github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'proposal')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - uses: actions/checkout@v4
-      - name: 生成开发方案
-        run: python .github/scripts/generate_plan.py
+      - name: 检查是否已有方案
+        id: existing
+        run: |
+          found=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '[.comments[] | select(.author.login == "github-actions[bot]") | .body | contains("<!-- auto-dev-plan -->")] | any')
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+      - name: 安装 Kimi Code CLI
+        if: steps.existing.outputs.found != 'true'
+        uses: ./.github/actions/setup-kimi
+        with:
+          version: ${{ vars.KIMI_CLI_VERSION || 'latest' }}
+      - name: 生成并发布开发方案
+        if: steps.existing.outputs.found != 'true'
+        run: kimi -p "$(cat .github/prompts/plan-issue.md)"
 
   from-doc:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    env:
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
-      LLM_MODEL: ${{ vars.LLM_MODEL }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 找出新增/修改的方案文档
+      - name: 找出新增或修改的方案文档
         id: files
         run: |
           if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-            files=$(git ls-files 'proposals/*.md')
+            git ls-files 'proposals/*.md' > /tmp/auto-dev-all-proposals.txt
           else
-            files=$(git diff --name-only --diff-filter=AM "${{ github.event.before }}" "${{ github.sha }}" -- 'proposals/*.md')
+            git diff --name-only --diff-filter=AM "${{ github.event.before }}" "${{ github.sha }}" -- 'proposals/*.md' > /tmp/auto-dev-all-proposals.txt
           fi
-          echo "files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$files" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-      - name: 生成开发方案
-        if: steps.files.outputs.files != ''
+          grep -v '^proposals/README.md$' /tmp/auto-dev-all-proposals.txt > /tmp/auto-dev-proposals.txt || true
+          if [ -s /tmp/auto-dev-proposals.txt ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 安装 Kimi Code CLI
+        if: steps.files.outputs.changed == 'true'
+        uses: ./.github/actions/setup-kimi
+        with:
+          version: ${{ vars.KIMI_CLI_VERSION || 'latest' }}
+      - name: 逐文档生成开发方案
+        if: steps.files.outputs.changed == 'true'
         run: |
-          for f in ${{ steps.files.outputs.files }}; do
-            PROPOSAL_PATH="$f" python .github/scripts/generate_plan.py
-          done
+          while IFS= read -r proposal; do
+            [ -z "$proposal" ] && continue
+            export PROPOSAL_PATH="$proposal"
+            kimi -p "$(cat .github/prompts/plan-doc.md)"
+          done < /tmp/auto-dev-proposals.txt
