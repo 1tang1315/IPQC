@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: PR number to fix
         required: true
         type: string
 
@@ -13,91 +12,10 @@ permissions:
   pull-requests: write
   actions: write
 
-concurrency:
-  group: auto-fix-${{ inputs.pr_number }}
-  cancel-in-progress: false
-
-env:
-  KIMI_MODEL_NAME: ${{ vars.LLM_MODEL || 'kimi-for-coding' }}
-  KIMI_MODEL_API_KEY: ${{ secrets.LLM_API_KEY }}
-  KIMI_MODEL_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://api.kimi.com/coding/v1' }}
-  KIMI_CODE_TRUST_WORKSPACE: '1'
-  KIMI_CODE_NO_AUTO_UPDATE: '1'
-  KIMI_DISABLE_TELEMETRY: '1'
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 jobs:
   fix:
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    env:
-      PR_NUMBER: ${{ inputs.pr_number }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: 检查分支和自动修复轮数
-        id: rounds
-        run: |
-          head_ref=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
-          echo "branch=$head_ref" >> "$GITHUB_OUTPUT"
-          if [[ "$head_ref" != auto/* ]]; then
-            echo "allowed=false" >> "$GITHUB_OUTPUT"
-            echo "Only auto/ branches can be fixed automatically."
-            exit 0
-          fi
-          count=$(gh pr view "$PR_NUMBER" --json reviews --jq '[.reviews[] | select(.author.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED")] | length')
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          if [ "$count" -gt 3 ]; then
-            echo "allowed=false" >> "$GITHUB_OUTPUT"
-            gh pr comment "$PR_NUMBER" --body "已完成 3 轮自动修复，仍有评审意见未解决，请人工介入。"
-          else
-            echo "allowed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: 安装 Kimi Code CLI
-        if: steps.rounds.outputs.allowed == 'true'
-        uses: ./.github/actions/setup-kimi
-        with:
-          version: ${{ vars.KIMI_CLI_VERSION || 'latest' }}
-      - name: 准备修复分支
-        if: steps.rounds.outputs.allowed == 'true'
-        run: |
-          git config user.name "auto-dev-bot"
-          git config user.email "auto-dev-bot@users.noreply.github.com"
-          git fetch origin
-          git checkout -B "${{ steps.rounds.outputs.branch }}" "origin/${{ steps.rounds.outputs.branch }}"
-      - name: 使用 Kimi Code 修复评审问题
-        if: steps.rounds.outputs.allowed == 'true'
-        run: kimi -p "$(cat .github/prompts/fix.md)"
-      - name: 检测文件变更
-        id: changes
-        if: steps.rounds.outputs.allowed == 'true'
-        run: |
-          git add -A
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            gh pr comment "$PR_NUMBER" --body "修复流程已执行，但没有检测到文件变更，请人工确认评审意见。"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: 阻止修改受保护目录
-        if: steps.changes.outputs.changed == 'true'
-        run: |
-          protected=$(git diff --cached --name-only -- .github/)
-          if [ -n "$protected" ]; then
-            echo "Agent attempted to modify protected .github/ paths. Changes will not be committed."
-            printf '%s\n' "$protected"
-            exit 1
-          fi
-      - name: 提交并推送修复
-        if: steps.changes.outputs.changed == 'true'
-        run: |
-          git commit -m "auto: fix review comments for PR #${PR_NUMBER}"
-          git push origin "${{ steps.rounds.outputs.branch }}"
-          if [ ! -s /tmp/auto-dev-fix-summary.md ]; then
-            echo "Kimi Code 已按评审意见完成修复，详细过程请查看 Actions 日志。" > /tmp/auto-dev-fix-summary.md
-          fi
-          gh pr comment "$PR_NUMBER" --body-file /tmp/auto-dev-fix-summary.md
-      - name: 显式调度重新评审
-        if: steps.changes.outputs.changed == 'true'
-        run: gh workflow run auto-review.yml -f pr_number="$PR_NUMBER"
+    uses: GD-SaiKen/auto-dev/.github/workflows/auto-fix.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+    secrets:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}

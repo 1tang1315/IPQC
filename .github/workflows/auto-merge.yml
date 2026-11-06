@@ -4,11 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: PR number to merge
         required: true
         type: string
       expected_head_sha:
-        description: Reviewed PR head SHA that must match at merge time
         required: true
         type: string
 
@@ -18,51 +16,7 @@ permissions:
 
 jobs:
   merge:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PR_NUMBER: ${{ inputs.pr_number }}
-      EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
-    steps:
-      - name: 校验分支、head SHA 和对应评审
-        id: guard
-        run: |
-          allowed=true
-          read -r state head_sha head_ref < <(gh pr view "$PR_NUMBER" --json state,headRefOid,headRefName --jq '[.state, .headRefOid, .headRefName] | @tsv')
-          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
-          if [ "$state" != "OPEN" ] || [[ "$head_ref" != auto/* ]]; then
-            allowed=false
-          fi
-          if [ "$head_sha" != "$EXPECTED_HEAD_SHA" ]; then
-            echo "PR head changed after review; skip merging $EXPECTED_HEAD_SHA."
-            allowed=false
-          fi
-          approved=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate --jq --arg sha "$EXPECTED_HEAD_SHA" '[.[] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and .commit_id == $sha)] | length')
-          if [ "$approved" -eq 0 ]; then
-            echo "No bot APPROVED review found for $EXPECTED_HEAD_SHA."
-            allowed=false
-          fi
-          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
-      - name: 等待检查通过
-        if: steps.guard.outputs.allowed == 'true'
-        run: |
-          status=0
-          out=$(gh pr checks "$PR_NUMBER" --watch 2>&1) || status=$?
-          printf '%s\n' "$out"
-          if [ "$status" -ne 0 ]; then
-            if [[ "$out" == *"no checks reported"* ]]; then
-              echo "该 PR 无检查项，直接进入合并"
-              exit 0
-            fi
-            echo "检查未通过，取消自动合并"
-            exit 1
-          fi
-      - name: 按已评审 SHA 进行 squash 合并
-        if: steps.guard.outputs.allowed == 'true'
-        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/merge" -f merge_method=squash -f sha="$EXPECTED_HEAD_SHA" --jq '.message'
-      - name: 删除已合并的开发分支
-        if: steps.guard.outputs.allowed == 'true'
-        env:
-          HEAD_REF: ${{ steps.guard.outputs.head_ref }}
-        run: gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${HEAD_REF}" || echo "分支已不存在，无需重复删除"
+    uses: GD-SaiKen/auto-dev/.github/workflows/auto-merge.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      expected_head_sha: ${{ inputs.expected_head_sha }}
